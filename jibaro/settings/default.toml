@@ -1,0 +1,16 @@
+title = "Jibaro config"
+
+[bucket]
+storage_system = "s3"
+raw = "datalake-raw"
+staged = 'datalake-staged'
+curated = 'datalake-curated'
+spark_control = 'spark-control'
+
+[kafka]
+bootstrap_servers = "localhost:9092"
+tls_enable = false
+schema_registry = "http://localhost:8081"
+
+[deltalake]
+max_num_files_allowed = 10000
