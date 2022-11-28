@@ -3,6 +3,7 @@ from jibaro.datalake.path import mount_checkpoint_path, mount_path, mount_histor
 from jibaro.settings import settings
 from jibaro.utils import path_exists, delete_path
 import pyspark.sql.functions as fn
+# from pyspark.sql.functions import udf, col, from_json
 from pyspark.sql.types import StringType
 from pyspark.sql.window import Window
 from pyspark.sql.avro.functions import from_avro
@@ -34,16 +35,19 @@ def kafka_to_raw(spark, output_layer, bootstrap_servers, topic):
     ).awaitTermination()
 
 
+def get_schema_registry_client(schema_registry_url: str):
+    schema_registry_conf = {
+        'url': schema_registry_url,
+        # 'basic.auth.user.info': '{}:{}'.format(confluentRegistryApiKey, confluentRegistrySecret)
+    }
+    return SchemaRegistryClient(schema_registry_conf)
+
+
 def avro_handler(spark, source_layer, target_layer, project_name, database, table_name, schema_registry_url):
     sc = spark.sparkContext
 
-    schemaRegistryUrl: str = schema_registry_url
+    schema_registry_client = get_schema_registry_client(schema_registry_url)
     fromAvroOptions = {"mode": "FAILFAST"}
-    schema_registry_conf = {
-        'url': schemaRegistryUrl,
-        # 'basic.auth.user.info': '{}:{}'.format(confluentRegistryApiKey, confluentRegistrySecret)
-    }
-    schema_registry_client = SchemaRegistryClient(schema_registry_conf)
 
     binary_to_string = fn.udf(lambda x: str(
         int.from_bytes(x, byteorder='big')), StringType())
@@ -141,28 +145,228 @@ def avro_handler(spark, source_layer, target_layer, project_name, database, tabl
     print("writeStream Done")
 
 
+def protobuf_handler(spark, source_layer, target_layer, project_name, database, table_name, schema_registry_url):
+    sc = spark.sparkContext
+
+    schema_registry_client = get_schema_registry_client(schema_registry_url)
+
+    # TODO: Refactor reuse
+    binary_to_string = fn.udf(lambda x: str(
+        int.from_bytes(x, byteorder='big')), StringType())
+
+    def getSchema(id):
+        return str(schema_registry_client.get_schema(id).schema_str)
+
+    df = (
+        spark.readStream.format('delta').load(
+            layer=source_layer,
+            project_name=project_name,
+            database=database,
+            table_name=table_name
+        )
+    )
+
+    # [BEGIN] process_confluent_schemaregistry
+
+    def process_confluent_schemaregistry(df_batch, batch_id):
+        print(f"batch_id: {batch_id}")
+
+        # I dunno but I need to jump 7 bytes instead of 6
+        df_change = (
+            df_batch
+            .withColumn('keySchemaId', binary_to_string(fn.expr("substring(key, 2, 4)")))
+            .withColumn('key', fn.expr("substring(key, 7, length(value)-5)"))
+            .withColumn('valueSchemaId', binary_to_string(fn.expr("substring(value, 2, 4)")))
+            .withColumn('value', fn.expr("substring(value, 7, length(value)-5)"))
+        )
+        distinctSchemaIdDF = (
+            df_change
+            .select(
+                fn.col('keySchemaId').cast('integer'),
+                fn.col('valueSchemaId').cast('integer')
+            ).distinct().orderBy('keySchemaId', 'valueSchemaId')
+        )
+
+        for valueRow in distinctSchemaIdDF.collect():
+            currentKeySchemaId = sc.broadcast(valueRow.keySchemaId)
+            currentKeySchema = sc.broadcast(
+                getSchema(currentKeySchemaId.value))
+
+            currentValueSchemaId = sc.broadcast(valueRow.valueSchemaId)
+            currentValueSchema = sc.broadcast(
+                getSchema(currentValueSchemaId.value))
+
+            print(f"currentKeySchemaId: {currentKeySchemaId.value}")
+            print(f"currentKeySchema: {currentKeySchema.value}")
+            print(f"currentValueSchemaId: {currentValueSchemaId.value}")
+            print(f"currentValueSchema: {currentValueSchema.value}")
+
+            filterDF = df_change.filter(
+                (fn.col('keySchemaId') == currentKeySchemaId.value)
+                &
+                (fn.col('valueSchemaId') == currentValueSchemaId.value)
+            )
+            filterDF.show()
+
+            def generate_proto_descriptors(key_schema, value_schema):
+                import grpc_tools.protoc as protoc
+                import os
+                from types import ModuleType
+                from jibaro.datalake import proto_handler
+
+                TEMP_FOLDER = "/tmp/pipeline/protobuf"
+
+                os.makedirs(TEMP_FOLDER, exist_ok=True)
+
+                with open(TEMP_FOLDER + f"/key.proto", "w") as w:
+                    w.write(key_schema)
+                with open(TEMP_FOLDER + f"/value.proto", "w") as w:
+                    w.write(value_schema)
+
+                protoc.main([
+                    "key.proto",
+                    f"--proto_path={TEMP_FOLDER}/",
+                    f"--python_out={TEMP_FOLDER}/",
+                    "key.proto",
+                ])
+                protoc.main([
+                    "value.proto",
+                    f"--proto_path={TEMP_FOLDER}/",
+                    f"--python_out={TEMP_FOLDER}/",
+                    "value.proto",
+                ])
+
+                key_proto = None
+                value_proto = None
+                with open(f"{TEMP_FOLDER}/key_pb2.py") as f:
+                    key_proto = f.read()
+                with open(f"{TEMP_FOLDER}/value_pb2.py") as f:
+                    value_proto = f.read()
+                key_compiled = compile(key_proto, '', 'exec')
+                value_compiled = compile(value_proto, '', 'exec')
+                key_module = ModuleType("tmp_key_module")
+                value_module = ModuleType("tmp_value_module")
+                exec(key_compiled, key_module.__dict__)
+                exec(value_compiled, value_module.__dict__)
+
+                key_schema = proto_handler.schemaFor(
+                    proto_handler.parse_protofile(
+                        f"{TEMP_FOLDER}/key.proto")['messages']['Key']
+                )
+                value_schema = proto_handler.schemaFor(
+                    proto_handler.parse_protofile(
+                        f"{TEMP_FOLDER}/value.proto")['messages']['Envelope']
+                )
+                return_value_key = {
+                    'module': key_module,
+                    'schema': key_schema,
+                }
+                return_value_value = {
+                    'module': value_module,
+                    'schema': value_schema,
+                }
+                return return_value_key, return_value_value
+
+            def deserialize_key_to_json(data):
+                import sys
+                from google.protobuf.json_format import MessageToJson
+
+                TEMP_FOLDER = "/tmp/pipeline/protobuf"
+                sys.path.append(TEMP_FOLDER)
+                from key_pb2 import Key
+
+                proto = Key()
+                proto.ParseFromString(bytes(data))
+                json_string = MessageToJson(proto)
+                return json_string
+
+            def deserialize_to_json(data):
+                from google.protobuf.json_format import MessageToJson
+                import sys
+
+                TEMP_FOLDER = "/tmp/pipeline/protobuf"
+                sys.path.append(TEMP_FOLDER)
+                from value_pb2 import Envelope
+
+                proto = Envelope()
+                proto.ParseFromString(bytes(data))
+                json_string = MessageToJson(proto)
+                return json_string
+
+            key_module, value_module = generate_proto_descriptors(
+                currentKeySchema.value, currentValueSchema.value)
+
+            deser_keyUDF = fn.udf(
+                lambda row: deserialize_key_to_json(row))
+
+            deser_valueUDF = fn.udf(
+                lambda row: deserialize_to_json(row))
+
+            print("---------------------------------------------")
+            print(key_module, value_module)
+            print("---------------------------------------------")
+
+            (
+                filterDF.select(
+                    fn.from_json(
+                        deser_keyUDF(fn.col('key')),
+                        key_module['schema']
+                    ).alias('key'),
+                    fn.from_json(
+                        deser_valueUDF(fn.col('value')),
+                        value_module['schema']
+                    ).alias('value'),
+                    'topic',
+                    'partition',
+                    'offset',
+                    'timestamp',
+                    'timestampType',
+                    fn.col('keySchemaId').cast('integer'),
+                    fn.col('valueSchemaId').cast('integer'),
+                )
+                .write
+                .format("delta")
+                .mode("append")
+                .option("mergeSchema", "true")
+                .save(
+                    mount_path(
+                        layer=target_layer,
+                        project_name=project_name,
+                        database=database,
+                        table_name=table_name
+                    )
+                )
+            )
+
+    ###############################################################
+    # [END] process_confluent_schemaregistry
+    ###############################################################
+    (
+        df
+        .writeStream
+        .trigger(once=True)
+        # .option("checkpointLocation", mount_checkpoint_path(target_layer, project_name, database, table_name))
+        .foreachBatch(process_confluent_schemaregistry)
+        .start().awaitTermination()
+    )
+    print("writeStream Done")
+
+
 def raw_to_staged(spark, project_name, database, table_name, content_type='avro'):
     schema_registry_url = settings.schema_registry_url
 
     if content_type == 'avro':
         avro_handler(spark=spark, source_layer='raw', target_layer='staged', project_name=project_name, database=database,
                      table_name=table_name, schema_registry_url=schema_registry_url)
+    elif content_type == 'protobuf':
+        protobuf_handler(spark=spark, source_layer='raw', target_layer='staged', project_name=project_name, database=database,
+                         table_name=table_name, schema_registry_url=schema_registry_url)
     else:
         raise NotImplemented
 
 
 def staged_to_curated(spark, project_name, database, table_name):
     sc = spark.sparkContext
-
-    schemaRegistryUrl: str = settings.schema_registry_url
-    schema_registry_conf = {
-        'url': schemaRegistryUrl,
-        # 'basic.auth.user.info': '{}:{}'.format(confluentRegistryApiKey, confluentRegistrySecret)
-    }
-    schema_registry_client = SchemaRegistryClient(schema_registry_conf)
-
-    # def getSchema(id):
-    #     return str(schema_registry_client.get_schema(id).schema_str)
 
     source_layer = 'staged'
     target_layer = 'curated'

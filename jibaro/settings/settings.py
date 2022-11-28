@@ -5,6 +5,7 @@ import os
 from pydantic import BaseSettings
 
 
+# TODO: Support custom configuration files by environment variable
 config = toml.load(os.path.join(os.path.dirname(__file__), 'default.toml'))
 
 
