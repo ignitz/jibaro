@@ -13,4 +13,6 @@ curated: ## curated
 
 test: ## test
 	# Testing protobuf
-	@spark-submit tests_scripts/raw2staged.py 'protobuf' 'inventory' 'products' protobuf
+	spark-submit --executor-memory 3g --driver-memory 6g tests_scripts/kafka2raw.py 'protobuf.inventory.products'
+	spark-submit --executor-memory 3g --driver-memory 6g tests_scripts/raw2staged.py 'protobuf' 'inventory' 'products' protobuf
+	spark-submit --executor-memory 3g --driver-memory 6g tests_scripts/staged2curated.py 'protobuf' 'inventory' 'products'

@@ -345,7 +345,7 @@ def protobuf_handler(spark, source_layer, target_layer, project_name, database, 
         df
         .writeStream
         .trigger(once=True)
-        # .option("checkpointLocation", mount_checkpoint_path(target_layer, project_name, database, table_name))
+        .option("checkpointLocation", mount_checkpoint_path(target_layer, project_name, database, table_name))
         .foreachBatch(process_confluent_schemaregistry)
         .start().awaitTermination()
     )
