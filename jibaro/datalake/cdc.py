@@ -270,12 +270,17 @@ def protobuf_handler(spark, source_layer, target_layer, project_name, database, 
             def deserialize_key_to_json(data):
                 import sys
                 from google.protobuf.json_format import MessageToJson
+                from types import ModuleType
 
                 TEMP_FOLDER = "/tmp/pipeline/protobuf"
-                sys.path.append(TEMP_FOLDER)
-                from key_pb2 import Key
+                key_proto = None
+                with open(f"{TEMP_FOLDER}/key_pb2.py") as f:
+                    key_proto = f.read()
+                key_compiled = compile(key_proto, '', 'exec')
+                key_module = ModuleType("tmp_key_module")
+                exec(key_compiled, key_module.__dict__)
 
-                proto = Key()
+                proto = key_module.Key()
                 proto.ParseFromString(bytes(data))
                 json_string = MessageToJson(proto)
                 return json_string
@@ -324,19 +329,19 @@ def protobuf_handler(spark, source_layer, target_layer, project_name, database, 
                     fn.col('keySchemaId').cast('integer'),
                     fn.col('valueSchemaId').cast('integer'),
                 )
-                .write
-                .format("delta")
-                .mode("append")
-                .option("mergeSchema", "true")
-                .save(
-                    mount_path(
-                        layer=target_layer,
-                        project_name=project_name,
-                        database=database,
-                        table_name=table_name
-                    )
-                )
-            )
+                # .write
+                # .format("delta")
+                # .mode("append")
+                # .option("mergeSchema", "true")
+                # .save(
+                #     mount_path(
+                #         layer=target_layer,
+                #         project_name=project_name,
+                #         database=database,
+                #         table_name=table_name
+                #     )
+                # )
+            ).show()
 
     ###############################################################
     # [END] process_confluent_schemaregistry
@@ -345,7 +350,7 @@ def protobuf_handler(spark, source_layer, target_layer, project_name, database, 
         df
         .writeStream
         .trigger(once=True)
-        .option("checkpointLocation", mount_checkpoint_path(target_layer, project_name, database, table_name))
+        # .option("checkpointLocation", mount_checkpoint_path(target_layer, project_name, database, table_name))
         .foreachBatch(process_confluent_schemaregistry)
         .start().awaitTermination()
     )

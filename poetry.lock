@@ -92,6 +92,17 @@ importlib-metadata = ">=1.0.0"
 pyspark = ">=3.3.0,<3.4.0"
 
 [[package]]
+name = "dill"
+version = "0.3.6"
+description = "serialize all of python"
+category = "main"
+optional = false
+python-versions = ">=3.7"
+
+[package.extras]
+graph = ["objgraph (>=1.7.2)"]
+
+[[package]]
 name = "fastavro"
 version = "1.7.0"
 description = "Fast read/write of AVRO files"
@@ -368,7 +379,7 @@ testing = ["flake8 (<5)", "func-timeout", "jaraco.functools", "jaraco.itertools"
 [metadata]
 lock-version = "1.1"
 python-versions = "^3.7"
-content-hash = "1be683e6de4f53a11e94f52a17666cd91e747eadc22d087bf8536feb4d11c247"
+content-hash = "d16947457682756fab68c32f79e69cde26b8f77443d182f7fbdd870ec3e164f9"
 
 [metadata.files]
 attrs = [
@@ -419,6 +430,10 @@ confluent-kafka = [
 delta-spark = [
     {file = "delta-spark-2.1.1.tar.gz", hash = "sha256:cbc0a280944e1f6599771f8d34662dccddb7431320707f0ef1147e99f9e39dfa"},
     {file = "delta_spark-2.1.1-py3-none-any.whl", hash = "sha256:623b06467d138053e76d58d6e7c215cecff08e20e21e3ce5649b5d862acdced7"},
+]
+dill = [
+    {file = "dill-0.3.6-py3-none-any.whl", hash = "sha256:a07ffd2351b8c678dfc4a856a3005f8067aea51d6ba6c700796a4d9e280f39f0"},
+    {file = "dill-0.3.6.tar.gz", hash = "sha256:e5db55f3687856d8fbdab002ed78544e1c4559a130302693d839dfe8f93f2373"},
 ]
 fastavro = [
     {file = "fastavro-1.7.0-cp310-cp310-macosx_10_14_x86_64.whl", hash = "sha256:ab3387a06e272980fa034f5c62f7063977b77df6416d3d30a4d3b49cc8827566"},
