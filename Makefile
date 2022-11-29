@@ -12,7 +12,6 @@ curated: ## curated
 	@spark-submit tests_scripts/staged2curated.py 'dbserver1' 'inventory' 'products'
 
 test: ## test
-	# Testing protobuf
-	# spark-submit --executor-memory 3g --driver-memory 6g tests_scripts/kafka2raw.py 'protobuf.inventory.products'
-	spark-submit --executor-memory 3g --driver-memory 6g tests_scripts/raw2staged.py 'protobuf' 'inventory' 'products' protobuf
-	# spark-submit --executor-memory 3g --driver-memory 6g tests_scripts/staged2curated.py 'protobuf' 'inventory' 'products'
+	spark-submit --executor-memory 3g --driver-memory 6g --properties-file "$(PWD)/tests_scripts/spark.properties" tests_scripts/kafka2raw.py 'protobuf.inventory.products'
+	spark-submit --executor-memory 3g --driver-memory 6g --properties-file "$(PWD)/tests_scripts/spark.properties" tests_scripts/raw2staged.py 'protobuf' 'inventory' 'products' protobuf
+	spark-submit --executor-memory 3g --driver-memory 6g --properties-file "$(PWD)/tests_scripts/spark.properties" tests_scripts/staged2curated.py 'protobuf' 'inventory' 'products'

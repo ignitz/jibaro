@@ -9,6 +9,8 @@ from pyspark.sql.window import Window
 from pyspark.sql.avro.functions import from_avro
 from confluent_kafka.schema_registry import SchemaRegistryClient
 from delta import DeltaTable
+from google.protobuf.json_format import MessageToJson
+from types import ModuleType
 
 __all__ = ["kafka_to_raw", "raw_to_staged", "staged_to_curated"]
 
@@ -242,12 +244,6 @@ def protobuf_handler(spark, source_layer, target_layer, project_name, database, 
                     key_proto = f.read()
                 with open(f"{TEMP_FOLDER}/value_pb2.py") as f:
                     value_proto = f.read()
-                key_compiled = compile(key_proto, '', 'exec')
-                value_compiled = compile(value_proto, '', 'exec')
-                key_module = ModuleType("tmp_key_module")
-                value_module = ModuleType("tmp_value_module")
-                exec(key_compiled, key_module.__dict__)
-                exec(value_compiled, value_module.__dict__)
 
                 key_schema = proto_handler.schemaFor(
                     proto_handler.parse_protofile(
@@ -257,43 +253,23 @@ def protobuf_handler(spark, source_layer, target_layer, project_name, database, 
                     proto_handler.parse_protofile(
                         f"{TEMP_FOLDER}/value.proto")['messages']['Envelope']
                 )
-                return_value_key = {
-                    'module': key_module,
+                return_key = {
+                    'module': key_proto,
                     'schema': key_schema,
                 }
-                return_value_value = {
-                    'module': value_module,
+                return_value = {
+                    'module': value_proto,
                     'schema': value_schema,
                 }
-                return return_value_key, return_value_value
+                return return_key, return_value
 
-            def deserialize_key_to_json(data):
-                import sys
-                from google.protobuf.json_format import MessageToJson
-                from types import ModuleType
+            def deserialize_to_json(data, pb2_content, root_obj_name):
+                pb2_compile = compile(pb2_content, '', 'exec')
+                pb2_module = ModuleType(f"pb2_{root_obj_name.lower()}_module")
+                exec(pb2_compile, pb2_module.__dict__)
 
-                TEMP_FOLDER = "/tmp/pipeline/protobuf"
-                key_proto = None
-                with open(f"{TEMP_FOLDER}/key_pb2.py") as f:
-                    key_proto = f.read()
-                key_compiled = compile(key_proto, '', 'exec')
-                key_module = ModuleType("tmp_key_module")
-                exec(key_compiled, key_module.__dict__)
-
-                proto = key_module.Key()
-                proto.ParseFromString(bytes(data))
-                json_string = MessageToJson(proto)
-                return json_string
-
-            def deserialize_to_json(data):
-                from google.protobuf.json_format import MessageToJson
-                import sys
-
-                TEMP_FOLDER = "/tmp/pipeline/protobuf"
-                sys.path.append(TEMP_FOLDER)
-                from value_pb2 import Envelope
-
-                proto = Envelope()
+                # proto = getattr(pb2_module, root_obj_name)()
+                proto = pb2_module.Key() if root_obj_name == 'Key' else pb2_module.Envelope()
                 proto.ParseFromString(bytes(data))
                 json_string = MessageToJson(proto)
                 return json_string
@@ -301,24 +277,19 @@ def protobuf_handler(spark, source_layer, target_layer, project_name, database, 
             key_module, value_module = generate_proto_descriptors(
                 currentKeySchema.value, currentValueSchema.value)
 
-            deser_keyUDF = fn.udf(
-                lambda row: deserialize_key_to_json(row))
-
-            deser_valueUDF = fn.udf(
-                lambda row: deserialize_to_json(row))
-
-            print("---------------------------------------------")
-            print(key_module, value_module)
-            print("---------------------------------------------")
+            deserializeUDF = fn.udf(
+                lambda row, pb2_content, root_obj_name: deserialize_to_json(row, pb2_content, root_obj_name))
 
             (
                 filterDF.select(
                     fn.from_json(
-                        deser_keyUDF(fn.col('key')),
+                        deserializeUDF(
+                            fn.col('key'), fn.lit(key_module['module']), fn.lit('Key')),
                         key_module['schema']
                     ).alias('key'),
                     fn.from_json(
-                        deser_valueUDF(fn.col('value')),
+                        deserializeUDF(fn.col('value'),
+                                       fn.lit(value_module['module']), fn.lit('Envelope')),
                         value_module['schema']
                     ).alias('value'),
                     'topic',
@@ -329,19 +300,19 @@ def protobuf_handler(spark, source_layer, target_layer, project_name, database, 
                     fn.col('keySchemaId').cast('integer'),
                     fn.col('valueSchemaId').cast('integer'),
                 )
-                # .write
-                # .format("delta")
-                # .mode("append")
-                # .option("mergeSchema", "true")
-                # .save(
-                #     mount_path(
-                #         layer=target_layer,
-                #         project_name=project_name,
-                #         database=database,
-                #         table_name=table_name
-                #     )
-                # )
-            ).show()
+                .write
+                .format("delta")
+                .mode("append")
+                .option("mergeSchema", "true")
+                .save(
+                    mount_path(
+                        layer=target_layer,
+                        project_name=project_name,
+                        database=database,
+                        table_name=table_name
+                    )
+                )
+            )
 
     ###############################################################
     # [END] process_confluent_schemaregistry
@@ -350,7 +321,7 @@ def protobuf_handler(spark, source_layer, target_layer, project_name, database, 
         df
         .writeStream
         .trigger(once=True)
-        # .option("checkpointLocation", mount_checkpoint_path(target_layer, project_name, database, table_name))
+        .option("checkpointLocation", mount_checkpoint_path(target_layer, project_name, database, table_name))
         .foreachBatch(process_confluent_schemaregistry)
         .start().awaitTermination()
     )
