@@ -2,6 +2,7 @@ from jibaro.datalake.delta_handler import compact_files
 from jibaro.datalake.path import mount_checkpoint_path, mount_path, mount_history_path
 from jibaro.settings import settings
 from jibaro.utils import path_exists, delete_path
+from packaging import version
 import pyspark.sql.functions as fn
 # from pyspark.sql.functions import udf, col, from_json
 from pyspark.sql.types import StringType
@@ -29,7 +30,13 @@ def kafka_to_raw(spark, output_layer, bootstrap_servers, topic):
     # TODO: expected with less than two dots
     project_name, database, table_name = topic.split('.')
 
-    df.writeStream.trigger(once=True).format("delta").start(
+    df_write = (
+        df.writeStream.trigger(availableNow=True)
+        if version.parse(spark.version) > version.parse('3.3.0')
+        else
+        df.writeStream.trigger(once=True)
+    )
+    df_write.format("delta").start(
         layer=output_layer,
         project_name=project_name,
         database=database,
@@ -317,10 +324,17 @@ def protobuf_handler(spark, source_layer, target_layer, project_name, database, 
     ###############################################################
     # [END] process_confluent_schemaregistry
     ###############################################################
+
+    df_write = (
+        df.writeStream.trigger(availableNow=True).option(
+            "maxFilesPerTrigger", 1000
+        )
+        if version.parse(spark.version) > version.parse('3.3.0')
+        else
+        df.writeStream.trigger(once=True)
+    )
     (
-        df
-        .writeStream
-        .trigger(once=True)
+        df_write
         .option("checkpointLocation", mount_checkpoint_path(target_layer, project_name, database, table_name))
         .foreachBatch(process_confluent_schemaregistry)
         .start().awaitTermination()
