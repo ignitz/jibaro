@@ -4,14 +4,13 @@ from jibaro.settings import settings
 from jibaro.utils import path_exists, delete_path
 from packaging import version
 import pyspark.sql.functions as fn
-# from pyspark.sql.functions import udf, col, from_json
 from pyspark.sql.types import StringType
 from pyspark.sql.window import Window
 from pyspark.sql.avro.functions import from_avro
 from confluent_kafka.schema_registry import SchemaRegistryClient
 from delta import DeltaTable
-from google.protobuf.json_format import MessageToJson
 from types import ModuleType
+
 
 __all__ = ["kafka_to_raw", "raw_to_staged", "staged_to_curated"]
 
@@ -22,8 +21,7 @@ def kafka_to_raw(spark, output_layer, bootstrap_servers, topic):
         .option('kafka.bootstrap.servers', bootstrap_servers)
         .option('subscribe', topic)
         .option('startingOffsets', 'earliest')
-        # Will work only with Spark 3.3 with
-        .option('maxOffsetsPerTrigger', 100)
+        .option('maxOffsetsPerTrigger', 100000)
         .load()
     )
 
@@ -215,12 +213,10 @@ def protobuf_handler(spark, source_layer, target_layer, project_name, database, 
                 &
                 (fn.col('valueSchemaId') == currentValueSchemaId.value)
             )
-            filterDF.show()
 
             def generate_proto_descriptors(key_schema, value_schema):
                 import grpc_tools.protoc as protoc
                 import os
-                from types import ModuleType
                 from jibaro.datalake import proto_handler
 
                 TEMP_FOLDER = "/tmp/pipeline/protobuf"
@@ -260,6 +256,7 @@ def protobuf_handler(spark, source_layer, target_layer, project_name, database, 
                     proto_handler.parse_protofile(
                         f"{TEMP_FOLDER}/value.proto")['messages']['Envelope']
                 )
+
                 return_key = {
                     'module': key_proto,
                     'schema': key_schema,
@@ -271,15 +268,16 @@ def protobuf_handler(spark, source_layer, target_layer, project_name, database, 
                 return return_key, return_value
 
             def deserialize_to_json(data, pb2_content, root_obj_name):
+                from jibaro.datalake.proto_handler import convert_message_to_json
                 pb2_compile = compile(pb2_content, '', 'exec')
                 pb2_module = ModuleType(f"pb2_{root_obj_name.lower()}_module")
                 exec(pb2_compile, pb2_module.__dict__)
 
-                # proto = getattr(pb2_module, root_obj_name)()
+                # TODO: instanciate generic name
                 proto = pb2_module.Key() if root_obj_name == 'Key' else pb2_module.Envelope()
                 proto.ParseFromString(bytes(data))
-                json_string = MessageToJson(proto)
-                return json_string
+
+                return convert_message_to_json(proto)
 
             key_module, value_module = generate_proto_descriptors(
                 currentKeySchema.value, currentValueSchema.value)
@@ -287,17 +285,23 @@ def protobuf_handler(spark, source_layer, target_layer, project_name, database, 
             deserializeUDF = fn.udf(
                 lambda row, pb2_content, root_obj_name: deserialize_to_json(row, pb2_content, root_obj_name))
 
+            json_options = {
+                'mode': 'FAILFAST'
+            }
+
             (
                 filterDF.select(
                     fn.from_json(
                         deserializeUDF(
                             fn.col('key'), fn.lit(key_module['module']), fn.lit('Key')),
-                        key_module['schema']
+                        schema=key_module['schema'],
+                        options=json_options
                     ).alias('key'),
                     fn.from_json(
                         deserializeUDF(fn.col('value'),
                                        fn.lit(value_module['module']), fn.lit('Envelope')),
-                        value_module['schema']
+                        schema=value_module['schema'],
+                        options=json_options
                     ).alias('value'),
                     'topic',
                     'partition',
