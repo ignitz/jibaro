@@ -134,7 +134,7 @@ def typeFor(descriptor, obj, messages=[]):
             'float': types.FloatType(),
             'int32': types.IntegerType(),
             'int64': types.LongType(),
-            'uint32': types.LongType(),
+            'uint32': types.IntegerType(),
             'uint64': types.LongType(),
             'sint32': types.IntegerType(),
             'sint64': types.LongType(),
@@ -144,7 +144,7 @@ def typeFor(descriptor, obj, messages=[]):
             'sfixed64': types.LongType(),
             'bool': types.BooleanType(),
             'string': types.StringType(),
-            'bytes': types.BooleanType(),
+            'bytes': types.ByteType(),
         }[descriptor]
     except KeyError as error:
         import sys
