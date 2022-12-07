@@ -4,7 +4,7 @@ from jibaro.settings import settings
 from jibaro.utils import path_exists, delete_path
 from packaging import version
 import pyspark.sql.functions as fn
-from pyspark.sql.types import StringType
+import pyspark.sql.types as types
 from pyspark.sql.window import Window
 from pyspark.sql.avro.functions import from_avro
 from confluent_kafka.schema_registry import SchemaRegistryClient
@@ -15,27 +15,38 @@ from types import ModuleType
 __all__ = ["kafka_to_raw", "raw_to_staged", "staged_to_curated"]
 
 
-def kafka_to_raw(spark, output_layer, bootstrap_servers, topic):
+def kafka_to_raw(
+    spark, topic,
+    target_layer, project_name, database, table_name,
+    options={}
+):
+    # [BEGIN] Create DataStreamReader
+    # Default values
     df = (
         spark.readStream.format('kafka')
-        .option('kafka.bootstrap.servers', bootstrap_servers)
-        .option('subscribe', topic)
         .option('startingOffsets', 'earliest')
         .option('maxOffsetsPerTrigger', 100000)
-        .load()
     )
-
-    # TODO: expected with less than two dots
-    project_name, database, table_name = topic.split('.')
+    bootstrap_servers = settings.kafka_settings['bootstrap_servers']
+    df = (
+        df
+        .option('kafka.bootstrap.servers', bootstrap_servers)
+        .option('subscribe', topic)
+    )
+    # set custom options
+    for k, v in options:
+        df = df.option(k, v)
+    df = df.load()
+    # [END] Create DataStreamReader
 
     df_write = (
         df.writeStream.trigger(availableNow=True)
-        if version.parse(spark.version) > version.parse('3.3.0')
+        if version.parse(spark.version) >= version.parse('3.3.0')
         else
         df.writeStream.trigger(once=True)
     )
     df_write.format("delta").start(
-        layer=output_layer,
+        layer=target_layer,
         project_name=project_name,
         database=database,
         table_name=table_name
@@ -57,7 +68,7 @@ def avro_handler(spark, source_layer, target_layer, project_name, database, tabl
     fromAvroOptions = {"mode": "FAILFAST"}
 
     binary_to_string = fn.udf(lambda x: str(
-        int.from_bytes(x, byteorder='big')), StringType())
+        int.from_bytes(x, byteorder='big')), types.StringType())
 
     def getSchema(id):
         return str(schema_registry_client.get_schema(id).schema_str)
@@ -159,7 +170,7 @@ def protobuf_handler(spark, source_layer, target_layer, project_name, database, 
 
     # TODO: Refactor reuse
     binary_to_string = fn.udf(lambda x: str(
-        int.from_bytes(x, byteorder='big')), StringType())
+        int.from_bytes(x, byteorder='big')), types.StringType())
 
     def getSchema(id):
         return str(schema_registry_client.get_schema(id).schema_str)
@@ -385,9 +396,6 @@ def staged_to_curated(spark, project_name, database, table_name):
     def process_delta(df_batch, batch_id):
         print(f"batch_id: {batch_id}")
 
-        # drop_duplicates only works if key stay in the same partition
-        # df_batch = df_batch.orderBy(fn.col('timestamp').desc()).drop_duplicates(['key'])
-
         # Drop duplication with window partition
         df_batch = df_batch.withColumn(
             '_row_num',
@@ -398,8 +406,6 @@ def staged_to_curated(spark, project_name, database, table_name):
 
         key_schema_column = 'keySchemaId' if 'keySchemaId' in df.columns else 'keySchema'
         value_schema_column = 'valueSchemaId' if 'valueSchemaId' in df.columns else 'valueSchema'
-
-        df_batch.columns
 
         distinctSchemaIdDF = (
             df_batch
@@ -412,20 +418,15 @@ def staged_to_curated(spark, project_name, database, table_name):
         for valueRow in distinctSchemaIdDF.collect():
             currentKeySchemaId = sc.broadcast(
                 valueRow.asDict()[key_schema_column])
-            # currentKeySchema = sc.broadcast(getSchema(currentKeySchemaId.value))
 
             currentValueSchemaId = sc.broadcast(
                 valueRow.asDict()[value_schema_column])
-            # currentValueSchema = sc.broadcast(getSchema(currentValueSchemaId.value))
 
             filterDF = df_batch.filter(
                 (fn.col(key_schema_column) == currentKeySchemaId.value)
                 &
                 (fn.col(value_schema_column) == currentValueSchemaId.value)
             )
-
-            # TODO: process each column with SchemaRegistry
-            # currentValueSchema
 
             if not path_exists(spark, output_path):
                 dfUpdated = filterDF.filter("value.op != 'd'").select(
@@ -441,13 +442,22 @@ def staged_to_curated(spark, project_name, database, table_name):
             else:
                 if not DeltaTable.isDeltaTable(spark, output_path):
                     # Try to convert to Delta ?
+                    # TODO: Need to detect partitions before to convert to Delta
+                    # DeltaTable.convertToDelta(spark, f"parquet.`{output_path}`")
                     raise NotImplemented
                 dt = DeltaTable.forPath(spark, output_path)
 
                 # Need to fill payload before with schema.
-                dfUpdated = filterDF.filter("value.op != 'd'").select("value.after.*", "value.op").union(
-                    filterDF.filter("value.op = 'd'").select(
-                        "value.before.*", "value.op")
+                dfUpdated = (
+                    filterDF.filter("value.op != 'd'").select(
+                        "value.after.*",
+                        "value.op"
+                    )
+                    .union(
+                        filterDF.filter("value.op = 'd'").select(
+                            "value.before.*", "value.op"
+                        )
+                    )
                 )
 
                 (
