@@ -259,13 +259,15 @@ def protobuf_handler(spark, source_layer, target_layer, project_name, database, 
                 with open(f"{TEMP_FOLDER}/value_pb2.py") as f:
                     value_proto = f.read()
 
-                key_schema = proto_handler.schemaFor(
-                    proto_handler.parse_protofile(
-                        f"{TEMP_FOLDER}/key.proto")['messages']['Key']
+                key_schema = proto_handler.getDataFrameSchema(
+                    obj=proto_handler.parse_protofile(
+                        f"{TEMP_FOLDER}/key.proto"),
+                    root_obj_name="Key"
                 )
-                value_schema = proto_handler.schemaFor(
+                value_schema = proto_handler.getDataFrameSchema(
                     proto_handler.parse_protofile(
-                        f"{TEMP_FOLDER}/value.proto")['messages']['Envelope']
+                        f"{TEMP_FOLDER}/value.proto"),
+                    root_obj_name="Envelope"
                 )
 
                 return_key = {
@@ -440,11 +442,6 @@ def staged_to_curated(spark, project_name, database, table_name):
                     .save(output_path)
                 )
             else:
-                if not DeltaTable.isDeltaTable(spark, output_path):
-                    # Try to convert to Delta ?
-                    # TODO: Need to detect partitions before to convert to Delta
-                    # DeltaTable.convertToDelta(spark, f"parquet.`{output_path}`")
-                    raise NotImplemented
                 dt = DeltaTable.forPath(spark, output_path)
 
                 # Need to fill payload before with schema.

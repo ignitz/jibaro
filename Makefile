@@ -8,7 +8,7 @@ build:
 testavro: ## Test Avro pipeline
 	@spark-submit --executor-memory 3g --driver-memory 6g --properties-file "$(PWD)/tests_scripts/spark.properties" tests_scripts/kafka2raw.py 'dbserver1.inventory.products' 'dbserver1' 'inventory' 'products'
 	@spark-submit --executor-memory 3g --driver-memory 6g --properties-file "$(PWD)/tests_scripts/spark.properties" tests_scripts/raw2staged.py 'dbserver1' 'inventory' 'products' avro
-	@spark-submit --executor-memory 3g --driver-memory 6g --properties-file "$(PWD)/tests_scripts/spark.properties" tests_scripts/raw2staged.py 'dbserver1' 'inventory' 'products'
+	@spark-submit --executor-memory 3g --driver-memory 6g --properties-file "$(PWD)/tests_scripts/spark.properties" tests_scripts/staged2curated.py 'dbserver1' 'inventory' 'products'
 
 testprotobuf: ## Test Protobuf pipeline
 	@spark-submit --executor-memory 3g --driver-memory 6g --properties-file "$(PWD)/tests_scripts/spark.properties" tests_scripts/kafka2raw.py 'protobuf.inventory.products' 'protobuf' 'inventory' 'products'

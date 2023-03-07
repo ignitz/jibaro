@@ -1,6 +1,7 @@
 from pyspark.sql import types
 from jibaro.datalake import proto_parser
 import json
+import os
 from google.protobuf.descriptor import FieldDescriptor
 from functools import partial
 from google.protobuf.json_format import MessageToJson
@@ -125,7 +126,7 @@ def parse_protofile(filepath) -> dict:
     return json.loads(proto_parser.serialize2json_from_file(filepath))
 
 
-def typeFor(descriptor, obj, messages=[]):
+def typeFor(descriptor, obj):
     # https://developers.google.com/protocol-buffers/docs/proto3#scalar
     # https://developers.google.com/protocol-buffers/docs/proto3#json
     try:
@@ -148,16 +149,30 @@ def typeFor(descriptor, obj, messages=[]):
         }[descriptor]
     except KeyError as error:
         import sys
-        if descriptor not in messages:
+        if descriptor not in obj['messages'].keys():
             print(f'Unknow type {descriptor}', file=sys.stderr)
             raise error
         else:
-            return types.StructType(schemaFor(obj['messages'][descriptor]))
+            return types.StructType(schemaFor(obj['messages'][descriptor], obj))
 
 
-def schemaFor(obj):
+def getDataFrameSchema(obj, root_obj_name):
+    print(">>>>>>>>>>>>>>>>>>>")
+    print(json.dumps(obj))
+    print(">>>>>>>>>>>>>>>>>>>")
+    return schemaFor(
+        obj=obj['messages'][root_obj_name],
+        obj_all=obj
+    )
+
+
+def schemaFor(obj, obj_all):
     struct_fields = []
-    OBJ_NAMES = list(obj['messages'])
+    if obj.get('messages') is not None:
+        obj_all['messages'] = {
+            **obj_all['messages'],
+            **obj['messages'],
+        }
 
     obj['fields'].sort(key=lambda x: x['number'])
     for d in obj['fields']:
@@ -166,8 +181,83 @@ def schemaFor(obj):
         struct_fields.append(
             types.StructField(
                 name=name,
-                dataType=typeFor(type_name, obj, messages=OBJ_NAMES),
+                dataType=typeFor(type_name, obj_all),
                 nullable=True
             )
         )
     return types.StructType(struct_fields)
+
+
+def load_proto_file(path_file: str) -> str:
+    """
+    Loads the content of a proto file.
+
+    :Args:
+        path: The path to the proto file
+
+    :Returns:
+        The content of the proto file
+
+    :Example:
+        >>> load_proto_file("value.proto")
+    """
+    base_path = os.path.abspath(os.path.dirname(__file__))
+    proto_content = None
+    with open(f"{base_path}/{path_file}") as f:
+        proto_content = f.read()
+    return proto_content
+
+
+def generate_proto_descriptors(
+    proto_content: str,
+    message_obj_name: str,
+):
+    """
+    Generates the proto descriptors for a given proto file content
+    and message object name.
+
+    :Args:
+        proto_content: The content of the proto file
+        message_obj_name: The name of the message object
+
+    :Returns:
+        A dict containing the proto descriptors and the pyspark schema
+        for the message object.
+
+    :Example:
+        >>> proto_content = load_proto_file("value.proto")
+        >>> message_obj_name = "Envelope"
+        >>> generate_proto_descriptors(proto_content, message_obj_name)
+    """
+    import grpc_tools.protoc as protoc
+    import os
+    from proto_handler import proto_handler
+
+    TEMP_FOLDER = "/tmp/pipeline/protobuf"
+
+    os.makedirs(TEMP_FOLDER, exist_ok=True)
+
+    with open(TEMP_FOLDER + f"/{message_obj_name}.proto", "w") as w:
+        w.write(proto_content)
+
+    protoc.main([
+        f"{message_obj_name}.proto",
+        f"--proto_path={TEMP_FOLDER}/",
+        f"--python_out={TEMP_FOLDER}/",
+        f"{message_obj_name}.proto",
+    ])
+
+    value_proto = None
+    with open(f"{TEMP_FOLDER}/{message_obj_name}_pb2.py") as f:
+        value_proto = f.read()
+
+    value_schema = proto_handler.getDataFrameSchema(
+        proto_handler.parse_protofile(
+            f"{TEMP_FOLDER}/{message_obj_name}.proto"),
+        message_obj_name
+    )
+    return_value = {
+        'module': value_proto,
+        'schema': value_schema,
+    }
+    return return_value
