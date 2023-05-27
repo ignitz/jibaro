@@ -6,11 +6,8 @@ from packaging import version
 import pyspark.sql.functions as fn
 import pyspark.sql.types as types
 from pyspark.sql.window import Window
-from pyspark.sql.avro.functions import from_avro
-from pyspark.sql.protobuf.functions import from_protobuf, to_protobuf
 from confluent_kafka.schema_registry import SchemaRegistryClient
 from delta import DeltaTable
-from types import ModuleType
 
 
 __all__ = ["kafka_to_raw", "raw_to_staged", "staged_to_curated"]
@@ -66,6 +63,8 @@ def avro_handler(
     table_name,
     schema_registry_url,
 ):
+    from pyspark.sql.avro.functions import from_avro
+
     sc = spark.sparkContext
 
     schema_registry_client = get_schema_registry_client(schema_registry_url)
@@ -180,6 +179,8 @@ def protobuf_handler(
     table_name,
     schema_registry_url,
 ):
+    from pyspark.sql.protobuf.functions import from_protobuf
+
     sc = spark.sparkContext
 
     schema_registry_client = get_schema_registry_client(schema_registry_url)
@@ -246,7 +247,6 @@ def protobuf_handler(
             ) -> tuple[str, str]:
                 import grpc_tools.protoc as protoc
                 import os
-                from jibaro.datalake import proto_handler
 
                 TEMP_FOLDER = "/tmp/pipeline/protobuf"
 
@@ -278,41 +278,21 @@ def protobuf_handler(
                 return_path_value = f"{TEMP_FOLDER}/value.desc"
                 return return_path_key, return_path_value
 
-            # def deserialize_to_json(data, pb2_content, root_obj_name):
-            #     from jibaro.datalake.proto_handler import convert_message_to_json
-
-            #     pb2_compile = compile(pb2_content, "", "exec")
-            #     pb2_module = ModuleType(f"pb2_{root_obj_name.lower()}_module")
-            #     exec(pb2_compile, pb2_module.__dict__)
-
-            #     # TODO: instanciate generic name
-            #     proto = (
-            #         pb2_module.Key()
-            #         if root_obj_name == "Key"
-            #         else pb2_module.Envelope()
-            #     )
-            #     proto.ParseFromString(bytes(data))
-
-            #     return convert_message_to_json(proto)
-
             return_path_key, return_path_value = generate_proto_descriptors(
                 currentKeySchema.value, currentValueSchema.value
             )
 
-            # deserializeUDF = fn.udf(
-            #     lambda row, pb2_content, root_obj_name: deserialize_to_json(
-            #         row, pb2_content, root_obj_name
-            #     )
-            # )
-
-            json_options = {"mode": "FAILFAST"}
-
             (
                 filterDF.select(
-                    from_protobuf("key", "Key", return_path_key).alias("key"),
-                    from_protobuf("value", "Envelope", return_path_value).alias(
-                        "value"
-                    ),
+                    from_protobuf(
+                        "key", "Key", return_path_key, options={"mode": "FAILFAST"}
+                    ).alias("key"),
+                    from_protobuf(
+                        "value",
+                        "Envelope",
+                        return_path_value,
+                        options={"mode": "FAILFAST"},
+                    ).alias("value"),
                     "topic",
                     "partition",
                     "offset",
