@@ -8,7 +8,7 @@ readme = "README.md"
 
 [tool.poetry.dependencies]
 python = "^3.7"
-delta-spark = "2.2.0"
+delta-spark = "2.4.0"
 toml = "^0.10.2"
 pydantic = "^1.10.2"
 confluent-kafka = {version = ">=1.9.2", extras = ["avro", "json", "protobuf"]}
@@ -20,7 +20,7 @@ packaging = "^21.3"
 
 
 [tool.poetry.group.dev.dependencies]
-pyspark = "3.3.1"
+pyspark = "3.4.0"
 autopep8 = "^2.0.0"
 jupyter = "^1.0.0"
 notebook = "^6.5.2"
