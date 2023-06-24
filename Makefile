@@ -14,11 +14,11 @@ lake-destroy: ## 🗑 Destroy Confluent lake with docker compose
 	$(MAKE) -C lake_lab lake-destroy
 
 .PHONY: client-setup
-client-setup: lake-setup ## 🐰 Setup Trino, Hive and Superset clients
+client-setup: lake-setup ## 🐰 Setup Trino, Hive
 	$(MAKE) -C lake_lab client-setup
 
 .PHONY: client-destroy
-client-destroy: ## 🥕 Destroy Trino, Hive and Superset clients
+client-destroy: ## 🥕 Destroy Trino, Hive
 	$(MAKE) -C lake_lab client-destroy
 
 testavro: ## Test Avro pipeline
@@ -30,3 +30,11 @@ testprotobuf: ## Test Protobuf pipeline
 	@spark-submit --packages io.delta:delta-core_2.12:2.4.0,org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.0,org.apache.hadoop:hadoop-aws:3.3.4 --executor-memory 3g --driver-memory 6g --properties-file "$(PWD)/tests_scripts/spark.properties" tests_scripts/kafka2raw.py 'protobuf.inventory.products' 'protobuf' 'inventory' 'products'
 	@spark-submit --packages org.apache.spark:spark-protobuf_2.12:3.4.0,io.delta:delta-core_2.12:2.4.0,org.apache.hadoop:hadoop-aws:3.3.4 --executor-memory 3g --driver-memory 6g --properties-file "$(PWD)/tests_scripts/spark.properties" tests_scripts/raw2staged.py 'protobuf' 'inventory' 'products' protobuf
 	@spark-submit --packages io.delta:delta-core_2.12:2.4.0,org.apache.hadoop:hadoop-aws:3.3.4 --executor-memory 3g --driver-memory 6g --properties-file "$(PWD)/tests_scripts/spark.properties" tests_scripts/staged2curated.py 'protobuf' 'inventory' 'products'
+
+testwritekafka: ## Test write to topic
+	@curl -X DELETE http://localhost:8081/subjects/output.inventory.products-key
+	@curl -X DELETE http://localhost:8081/subjects/output.inventory.products-key/\?permanent\=true
+	@curl -X DELETE http://localhost:8081/subjects/output.inventory.products-value
+	@curl -X DELETE http://localhost:8081/subjects/output.inventory.products-value/\?permanent\=true
+	@docker exec -it broker kafka-topics --bootstrap-server localhost:9092 --topic output.inventory.products --delete --if-exists
+	@spark-submit --packages io.delta:delta-core_2.12:2.4.0,org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.0,org.apache.spark:spark-avro_2.12:3.4.0,org.apache.hadoop:hadoop-aws:3.3.4 --executor-memory 3g --driver-memory 6g --properties-file "$(PWD)/tests_scripts/spark.properties" tests_scripts/curated2kafka.py 'output.inventory.products' 'dbserver1' 'inventory' 'products'

@@ -71,7 +71,3 @@ services:
 networks:
   default:
     name: kind
-
-volumes:
-  superset-data:
-    driver: local

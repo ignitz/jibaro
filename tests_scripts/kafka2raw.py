@@ -9,7 +9,6 @@ table_name = sys.argv[4]
 
 spark = JibaroSession.builder.appName("Spark Streaming Delta").getOrCreate()
 
-
 kafka_to_raw(
     spark=spark,
     topic=topic,

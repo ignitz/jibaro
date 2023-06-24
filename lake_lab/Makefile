@@ -11,9 +11,9 @@ lake-destroy: ## Destroy Confluent lake with docker compose
 	@bash destroy_lake_stack.sh
 
 .PHONY: client-setup
-client-setup: ## Setup Trino, Hive and Superset clients
+client-setup: ## Setup Trino, Hive
 	@bash setup_clients_stack.sh
 
 .PHONY: client-destroy
-client-destroy: ## Destroy Trino, Hive and Superset clients
+client-destroy: ## Destroy Trino, Hive
 	@bash destroy_clients_stack.sh
