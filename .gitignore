@@ -161,3 +161,4 @@ cython_debug/
 
 # Spark folders
 spark-warehouse/
+metastore_db/

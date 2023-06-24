@@ -26,3 +26,7 @@ notebook = "^6.5.2"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+exclude = [
+    "tests",
+    "lake_lab"
+]
