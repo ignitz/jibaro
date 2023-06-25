@@ -21,4 +21,5 @@ dataframe_to_kafka(
     df_source=df,
     topic=topic,
     key_columns=["id"],
+    type="AVRO",
 )
