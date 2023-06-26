@@ -242,44 +242,10 @@ def protobuf_handler(
                 & (fn.col("valueSchemaId") == currentValueSchemaId.value)
             )
 
-            def generate_proto_descriptors(
-                key_schema: str, value_schema: str
-            ) -> tuple[str, str]:
-                import grpc_tools.protoc as protoc
-                import os
-
-                TEMP_FOLDER = "/tmp/pipeline/protobuf"
-
-                os.makedirs(TEMP_FOLDER, exist_ok=True)
-
-                with open(TEMP_FOLDER + f"/key.proto", "w") as w:
-                    w.write(key_schema)
-                with open(TEMP_FOLDER + f"/value.proto", "w") as w:
-                    w.write(value_schema)
-
-                protoc.main(
-                    [
-                        "--include_imports",
-                        f"--proto_path={TEMP_FOLDER}/",
-                        f"--descriptor_set_out={TEMP_FOLDER}/key.desc",
-                        f"key.proto",
-                    ]
-                )
-                protoc.main(
-                    [
-                        "--include_imports",
-                        f"--proto_path={TEMP_FOLDER}/",
-                        f"--descriptor_set_out={TEMP_FOLDER}/value.desc",
-                        "value.proto",
-                    ]
-                )
-
-                return_path_key = f"{TEMP_FOLDER}/key.desc"
-                return_path_value = f"{TEMP_FOLDER}/value.desc"
-                return return_path_key, return_path_value
+            from jibaro.utils import generate_proto_descriptors
 
             return_path_key, return_path_value = generate_proto_descriptors(
-                currentKeySchema.value, currentValueSchema.value
+                filterDF.first().topic, currentKeySchema.value, currentValueSchema.value
             )
 
             (
