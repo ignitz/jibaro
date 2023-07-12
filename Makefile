@@ -14,7 +14,7 @@ lake-destroy: ## 🗑 Destroy Confluent lake with docker compose
 	$(MAKE) -C lake_lab lake-destroy
 
 .PHONY: client-setup
-client-setup: lake-setup ## 🐰 Setup Trino, Hive
+client-setup: ## 🐰 Setup Trino, Hive
 	$(MAKE) -C lake_lab client-setup
 
 .PHONY: client-destroy
