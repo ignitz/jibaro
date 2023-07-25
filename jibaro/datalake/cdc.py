@@ -3,10 +3,9 @@ from jibaro.datalake.path import mount_checkpoint_path, mount_path, mount_histor
 from jibaro.settings import settings
 from jibaro.utils import path_exists, delete_path
 from packaging import version
+from pyspark.sql import SparkSession
 import pyspark.sql.functions as fn
-import pyspark.sql.types as types
 from pyspark.sql.window import Window
-from confluent_kafka.schema_registry import SchemaRegistryClient
 from delta import DeltaTable
 
 
@@ -14,7 +13,13 @@ __all__ = ["kafka_to_raw", "raw_to_staged", "staged_to_curated"]
 
 
 def kafka_to_raw(
-    spark, topic, target_layer, project_name, database, table_name, options={}
+    spark: SparkSession,
+    topic: str,
+    target_layer: str,
+    project_name: str,
+    database: str,
+    table_name: str,
+    options: dict = {},
 ):
     # [BEGIN] Create DataStreamReader
     # Default values
@@ -46,265 +51,18 @@ def kafka_to_raw(
     ).awaitTermination()
 
 
-def get_schema_registry_client(schema_registry_url: str):
-    schema_registry_conf = {
-        "url": schema_registry_url,
-        # 'basic.auth.user.info': '{}:{}'.format(confluentRegistryApiKey, confluentRegistrySecret)
-    }
-    return SchemaRegistryClient(schema_registry_conf)
-
-
-def avro_handler(
-    spark,
-    source_layer,
-    target_layer,
-    project_name,
-    database,
-    table_name,
-    schema_registry_url,
+def raw_to_staged(
+    spark: SparkSession,
+    project_name: str,
+    database: str,
+    table_name: str,
+    content_type="avro",
 ):
-    from pyspark.sql.avro.functions import from_avro
-
-    sc = spark.sparkContext
-
-    schema_registry_client = get_schema_registry_client(schema_registry_url)
-    fromAvroOptions = {"mode": "FAILFAST"}
-
-    binary_to_string = fn.udf(
-        lambda x: str(int.from_bytes(x, byteorder="big")), types.StringType()
-    )
-
-    def getSchema(id):
-        return str(schema_registry_client.get_schema(id).schema_str)
-
-    df = spark.readStream.format("delta").load(
-        layer=source_layer,
-        project_name=project_name,
-        database=database,
-        table_name=table_name,
-    )
-
-    # Option to process avro binary
-
-    def process_confluent_schemaregistry(df_batch, batch_id):
-        print(f"batch_id: {batch_id}")
-
-        # drop_duplicates only works if key stay in the same partition
-        # df_batch = df_batch.orderBy(fn.col('timestamp').desc()).drop_duplicates(['key'])
-        df_change = (
-            df_batch.withColumn(
-                "keySchemaId", binary_to_string(fn.expr("substring(key, 2, 4)"))
-            )
-            .withColumn("key", fn.expr("substring(key, 6, length(value)-5)"))
-            .withColumn(
-                "valueSchemaId", binary_to_string(fn.expr("substring(value, 2, 4)"))
-            )
-            .withColumn("value", fn.expr("substring(value, 6, length(value)-5)"))
-        )
-        distinctSchemaIdDF = (
-            df_change.select(
-                fn.col("keySchemaId").cast("integer"),
-                fn.col("valueSchemaId").cast("integer"),
-            )
-            .distinct()
-            .orderBy("keySchemaId", "valueSchemaId")
-        )
-
-        for valueRow in distinctSchemaIdDF.collect():
-            currentKeySchemaId = sc.broadcast(valueRow.keySchemaId)
-            currentKeySchema = sc.broadcast(getSchema(currentKeySchemaId.value))
-
-            currentValueSchemaId = sc.broadcast(valueRow.valueSchemaId)
-            currentValueSchema = sc.broadcast(getSchema(currentValueSchemaId.value))
-
-            print(f"currentKeySchemaId: {currentKeySchemaId}")
-            print(f"currentKeySchema: {currentKeySchema}")
-            print(f"currentValueSchemaId: {currentValueSchemaId}")
-            print(f"currentValueSchema: {currentValueSchema}")
-
-            filterDF = df_change.filter(
-                (fn.col("keySchemaId") == currentKeySchemaId.value)
-                & (fn.col("valueSchemaId") == currentValueSchemaId.value)
-            )
-
-            (
-                filterDF.select(
-                    from_avro("key", currentKeySchema.value, fromAvroOptions).alias(
-                        "key"
-                    ),
-                    from_avro("value", currentValueSchema.value, fromAvroOptions).alias(
-                        "value"
-                    ),
-                    "topic",
-                    "partition",
-                    "offset",
-                    "timestamp",
-                    "timestampType",
-                    fn.col("keySchemaId").cast("integer"),
-                    fn.col("valueSchemaId").cast("integer"),
-                )
-                .write.format("delta")
-                .mode("append")
-                .option("mergeSchema", "true")
-                .save(
-                    mount_path(
-                        layer=target_layer,
-                        project_name=project_name,
-                        database=database,
-                        table_name=table_name,
-                    )
-                )
-            )
-
-    ###############################################################
-    (
-        df.writeStream.trigger(once=True)
-        .option(
-            "checkpointLocation",
-            mount_checkpoint_path(target_layer, project_name, database, table_name),
-        )
-        .foreachBatch(process_confluent_schemaregistry)
-        .start()
-        .awaitTermination()
-    )
-    print("writeStream Done")
-
-
-def protobuf_handler(
-    spark,
-    source_layer,
-    target_layer,
-    project_name,
-    database,
-    table_name,
-    schema_registry_url,
-):
-    from pyspark.sql.protobuf.functions import from_protobuf
-
-    sc = spark.sparkContext
-
-    schema_registry_client = get_schema_registry_client(schema_registry_url)
-
-    # TODO: Refactor reuse
-    binary_to_string = fn.udf(
-        lambda x: str(int.from_bytes(x, byteorder="big")), types.StringType()
-    )
-
-    def getSchema(id):
-        return str(schema_registry_client.get_schema(id).schema_str)
-
-    df = spark.readStream.format("delta").load(
-        layer=source_layer,
-        project_name=project_name,
-        database=database,
-        table_name=table_name,
-    )
-
-    # [BEGIN] process_confluent_schemaregistry
-
-    def process_confluent_schemaregistry(df_batch, batch_id):
-        print(f"batch_id: {batch_id}")
-
-        # I dunno but I need to jump 7 bytes instead of 6
-        df_change = (
-            df_batch.withColumn(
-                "keySchemaId", binary_to_string(fn.expr("substring(key, 2, 4)"))
-            )
-            .withColumn("key", fn.expr("substring(key, 7, length(value)-6)"))
-            .withColumn(
-                "valueSchemaId", binary_to_string(fn.expr("substring(value, 2, 4)"))
-            )
-            .withColumn("value", fn.expr("substring(value, 7, length(value)-6)"))
-        )
-        distinctSchemaIdDF = (
-            df_change.select(
-                fn.col("keySchemaId").cast("integer"),
-                fn.col("valueSchemaId").cast("integer"),
-            )
-            .distinct()
-            .orderBy("keySchemaId", "valueSchemaId")
-        )
-
-        for valueRow in distinctSchemaIdDF.collect():
-            currentKeySchemaId = sc.broadcast(valueRow.keySchemaId)
-            currentKeySchema = sc.broadcast(getSchema(currentKeySchemaId.value))
-
-            currentValueSchemaId = sc.broadcast(valueRow.valueSchemaId)
-            currentValueSchema = sc.broadcast(getSchema(currentValueSchemaId.value))
-
-            print(f"currentKeySchemaId: {currentKeySchemaId.value}")
-            print(f"currentKeySchema: {currentKeySchema.value}")
-            print(f"currentValueSchemaId: {currentValueSchemaId.value}")
-            print(f"currentValueSchema: {currentValueSchema.value}")
-
-            filterDF = df_change.filter(
-                (fn.col("keySchemaId") == currentKeySchemaId.value)
-                & (fn.col("valueSchemaId") == currentValueSchemaId.value)
-            )
-
-            from jibaro.utils import generate_proto_descriptors
-
-            return_path_key, return_path_value = generate_proto_descriptors(
-                filterDF.first().topic, currentKeySchema.value, currentValueSchema.value
-            )
-
-            (
-                filterDF.select(
-                    from_protobuf(
-                        "key", "Key", return_path_key, options={"mode": "FAILFAST"}
-                    ).alias("key"),
-                    from_protobuf(
-                        "value",
-                        "Envelope",
-                        return_path_value,
-                        options={"mode": "FAILFAST"},
-                    ).alias("value"),
-                    "topic",
-                    "partition",
-                    "offset",
-                    "timestamp",
-                    "timestampType",
-                    fn.col("keySchemaId").cast("integer"),
-                    fn.col("valueSchemaId").cast("integer"),
-                )
-                .write.format("delta")
-                .mode("append")
-                .option("mergeSchema", "true")
-                .save(
-                    mount_path(
-                        layer=target_layer,
-                        project_name=project_name,
-                        database=database,
-                        table_name=table_name,
-                    )
-                )
-            )
-
-    ###############################################################
-    # [END] process_confluent_schemaregistry
-    ###############################################################
-
-    df_write = (
-        df.writeStream.trigger(availableNow=True).option("maxFilesPerTrigger", 1000)
-        if version.parse(spark.version) > version.parse("3.3.0")
-        else df.writeStream.trigger(once=True)
-    )
-    (
-        df_write.option(
-            "checkpointLocation",
-            mount_checkpoint_path(target_layer, project_name, database, table_name),
-        )
-        .foreachBatch(process_confluent_schemaregistry)
-        .start()
-        .awaitTermination()
-    )
-    print("writeStream Done")
-
-
-def raw_to_staged(spark, project_name, database, table_name, content_type="avro"):
     schema_registry_url = settings.schema_registry_url
 
     if content_type == "avro":
+        from jibaro.datalake.avro_handler import avro_handler
+
         avro_handler(
             spark=spark,
             source_layer="raw",
@@ -315,6 +73,8 @@ def raw_to_staged(spark, project_name, database, table_name, content_type="avro"
             schema_registry_url=schema_registry_url,
         )
     elif content_type == "protobuf":
+        from jibaro.datalake.protobuf_handler import protobuf_handler
+
         protobuf_handler(
             spark=spark,
             source_layer="raw",
@@ -328,7 +88,9 @@ def raw_to_staged(spark, project_name, database, table_name, content_type="avro"
         raise NotImplemented
 
 
-def staged_to_curated(spark, project_name, database, table_name):
+def staged_to_curated(
+    spark: SparkSession, project_name: str, database: str, table_name
+):
     sc = spark.sparkContext
 
     source_layer = "staged"
@@ -487,6 +249,7 @@ def staged_to_curated(spark, project_name, database, table_name):
     print("writeStream Done")
 
     # Generate manifest
+    # TODO: Incremental symlink
     dt = DeltaTable.forPath(spark, output_path)
     dt.generate("symlink_format_manifest")
 
