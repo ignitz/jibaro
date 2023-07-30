@@ -1,7 +1,11 @@
 import json
 import requests
+from typing import Optional
 from jibaro.settings import settings
 from pyspark.sql import types as tp
+import pyspark.sql.functions as fn
+import pyspark.sql.types as types
+from confluent_kafka.schema_registry import SchemaRegistryClient
 
 
 def path_exists(spark, path):
@@ -119,37 +123,62 @@ def extract_schema(
 
 
 def generate_proto_descriptors(
-    topic: str, key_schema: str, value_schema: str
+    topic: str, value_schema: str, key_schema: Optional[str] = None
 ) -> tuple[str, str]:
     import grpc_tools.protoc as protoc
     import os
 
     TEMP_FOLDER = f"/tmp/pipeline/protobuf/{topic}"
+    # TODO: need to know the spark work dir of Amazon EMR
+    # Spark on Kubernetes default work dir
+
+    SPARK_DIR = "/opt/spark/work-dir"
+    SPARK_DIR = os.getcwd()
 
     os.makedirs(TEMP_FOLDER, exist_ok=True)
 
-    with open(TEMP_FOLDER + f"/key.proto", "w") as w:
-        w.write(key_schema)
+    if key_schema is not None:
+        with open(TEMP_FOLDER + f"/key.proto", "w") as w:
+            w.write(key_schema)
+        protoc.main(
+            [
+                "--include_imports",
+                f"--proto_path={TEMP_FOLDER}/",
+                f"--descriptor_set_out={SPARK_DIR}/{topic}-key.desc",
+                f"key.proto",
+            ]
+        )
+
     with open(TEMP_FOLDER + f"/value.proto", "w") as w:
         w.write(value_schema)
-
     protoc.main(
         [
             "--include_imports",
             f"--proto_path={TEMP_FOLDER}/",
-            f"--descriptor_set_out={TEMP_FOLDER}/key.desc",
-            f"key.proto",
-        ]
-    )
-    protoc.main(
-        [
-            "--include_imports",
-            f"--proto_path={TEMP_FOLDER}/",
-            f"--descriptor_set_out={TEMP_FOLDER}/value.desc",
+            f"--descriptor_set_out={SPARK_DIR}/{topic}-value.desc",
             "value.proto",
         ]
     )
 
-    return_path_key = f"{TEMP_FOLDER}/key.desc"
-    return_path_value = f"{TEMP_FOLDER}/value.desc"
+    return_path_key = (
+        f"{SPARK_DIR}/{topic}-key.desc" if key_schema is not None else None
+    )
+    return_path_value = f"{SPARK_DIR}/{topic}-value.desc"
     return return_path_key, return_path_value
+
+
+def get_schema_registry_client(schema_registry_url: str):
+    schema_registry_conf = {
+        "url": schema_registry_url,
+        # 'basic.auth.user.info': '{}:{}'.format(confluentRegistryApiKey, confluentRegistrySecret)
+    }
+    return SchemaRegistryClient(schema_registry_conf)
+
+
+def getSchema(schema_registry_client, id):
+    return str(schema_registry_client.get_schema(id).schema_str)
+
+
+binary_to_string = fn.udf(
+    lambda x: str(int.from_bytes(x, byteorder="big")), types.StringType()
+)
