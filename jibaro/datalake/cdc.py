@@ -154,17 +154,25 @@ def staged_to_curated(
                 value_schema_column,
             )
             .distinct()
-            .orderBy(key_schema_column, value_schema_column)
+            .orderBy(
+                fn.asc_nulls_last(key_schema_column),
+                fn.asc_nulls_last(value_schema_column),
+            )
         )
 
         for valueRow in distinctSchemaIdDF.collect():
             currentKeySchemaId = sc.broadcast(valueRow.asDict()[key_schema_column])
-
             currentValueSchemaId = sc.broadcast(valueRow.asDict()[value_schema_column])
 
             filterDF = df_batch.filter(
-                (fn.col(key_schema_column) == currentKeySchemaId.value)
-                & (fn.col(value_schema_column) == currentValueSchemaId.value)
+                (
+                    fn.col(key_schema_column).isNull()
+                    | (fn.col(key_schema_column) == currentKeySchemaId.value)
+                )
+                & (
+                    fn.col(value_schema_column).isNull()
+                    | (fn.col(value_schema_column) == currentValueSchemaId.value)
+                )
             )
 
             if not path_exists(spark, output_path):
